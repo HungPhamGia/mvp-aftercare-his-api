@@ -14,6 +14,11 @@ from app.schemas import (
 app = FastAPI(title="Mock HIS API")
 
 
+@app.get("/")
+def health():
+    return {"status": "ok", "service": "mock-his-api"}
+
+
 def row_to_dict(obj) -> dict:
     return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
