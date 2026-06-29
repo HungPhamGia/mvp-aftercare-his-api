@@ -43,7 +43,7 @@ def latest_call_result(db: Session, ma_ho_so: str) -> CallResult | None:
 @app.post("/his/patient/fetch", response_model=SetVariablesOut)
 def patient_fetch(body: SetVariablesIn, db: Session = Depends(get_db)):
     # ponytail: temp debug — log the real Smartbot payload, remove once shape confirmed.
-    print(f"[patient_fetch] set_variables={body.set_variables}", flush=True)
+    #print(f"[patient_fetch] set_variables={body.set_variables}", flush=True)
     ma_ho_so = body.set_variables.get("ma_ho_so")
     if not ma_ho_so:
         raise HTTPException(400, "set_variables.ma_ho_so required")
