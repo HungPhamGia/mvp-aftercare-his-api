@@ -36,6 +36,8 @@ class BenhAn(Base):
     xet_nghiem: Mapped[str | None] = mapped_column(Text)
     ghi_chu_theo_doi: Mapped[str | None] = mapped_column(Text)
     lich_tai_kham: Mapped[date | None] = mapped_column(Date)
+    sdt_benh_nhan: Mapped[str | None] = mapped_column(String)
+    sdt_nguoi_nha: Mapped[str | None] = mapped_column(String)
 
 
 class CallResult(Base):
@@ -49,6 +51,7 @@ class CallResult(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime)
     raw_answers: Mapped[dict | None] = mapped_column(JSONB)
     extracted: Mapped[dict | None] = mapped_column(JSONB)
+    transcript: Mapped[list | None] = mapped_column(JSONB)
     tier: Mapped[str | None] = mapped_column(String)
     summary: Mapped[str | None] = mapped_column(Text)
     escalated: Mapped[bool | None] = mapped_column(Boolean)

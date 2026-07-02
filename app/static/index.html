@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AfterCare · Bảng điều phối</title>
+  <link rel="icon" href="images/aftercare-logo.jpg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <script type='text/javascript'>
+                    var VNPT = VNPT || {};
+                    VNPT.q = VNPT.q || [];
+                
+                    VNPT.app_key = 'a8ee3bc15b2d1b417b3c39ac219f69276d7fa821';
+                
+                    VNPT.url = 'https://console-smartux.vnpt.vn';
+                
+                    VNPT.q.push(['track_sessions']);
+                    VNPT.q.push(['track_pageview']);
+                    VNPT.q.push(['track_clicks']);
+                    VNPT.q.push(['track_scrolls']);
+                    VNPT.q.push(['track_errors']);
+                    VNPT.q.push(['track_links']);
+                    VNPT.q.push(['track_forms']);
+                    VNPT.q.push(['collect_from_forms']);
+                
+                    (function () {
+                    const paths = ['https://console-smartux.vnpt.vn/sdk/web/core-track.js', 'https://console-smartux.vnpt.vn/sdk/web/minify.min.js'];
+                    for (let i in paths) {
+                        var cly = document.createElement('script'); cly.type = 'text/javascript';
+                        cly.async = true;
+                        cly.src = paths[i];
+                        cly.onload = i == 0 ? function () { VNPT.init() } : function() { window.minify = require("html-minifier").minify; };
+                        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(cly, s);
+                    }
+                    })();
+                </script>
+</head>
+<body data-page="dashboard">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="AfterCare"></aside>
+    <main class="content">
+      <header class="page-head">
+        <div>
+          <h1>Bảng điều phối</h1>
+          <p class="sub">Bệnh viện X · Hôm nay 16/06/2026 — việc cần xử lý trước tiên</p>
+        </div>
+        <div class="page-head-actions" id="dashActions"></div>
+      </header>
+      <div id="quickCounts" class="head-meta" style="margin-bottom:16px"></div>
+      <section id="boardPrimary" class="board-primary" aria-label="Cần xử lý ngay"></section>
+      <section id="boardSec" class="board-sec" aria-label="Việc cần theo dõi"></section>
+    </main>
+  </div>
+  <script src="js/data.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/dashboard.js"></script>
+</body>
+</html>

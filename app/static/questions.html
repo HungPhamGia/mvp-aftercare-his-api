@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AfterCare · Bộ câu hỏi</title>
+  <link rel="icon" href="images/aftercare-logo.jpg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/questions.css">
+</head>
+<body data-page="patients" data-track="questions">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="AfterCare"></aside>
+    <main class="content">
+      <div id="qTop" class="case-top" style="border:0;margin-bottom:8px;padding-bottom:0"></div>
+      <section class="card">
+        <div class="q-toolbar">
+          <button class="btn btn-leaf" id="btnGen" type="button">Tạo câu hỏi</button>
+          <button class="btn" id="btnSave" type="button" disabled>Lưu</button>
+          <button class="btn btn-dark" id="btnApprove" type="button" disabled>Duyệt</button>
+          <span class="grow"></span>
+          <span id="qStatus" class="pill muted">Chưa có bộ câu hỏi</span>
+        </div>
+        <p class="muted-note" style="margin:10px 0 4px">Câu <b>lõi</b> (cảnh báo đỏ) không thể xóa. Có thể sửa nội dung, thêm câu, rồi Duyệt để dùng cho cuộc gọi.</p>
+        <ol id="qList" class="q-editor"></ol>
+        <button class="btn btn-sm" id="btnAdd" type="button" style="display:none">＋ Thêm câu hỏi</button>
+      </section>
+    </main>
+  </div>
+  <script src="js/data.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/questions.js"></script>
+</body>
+</html>

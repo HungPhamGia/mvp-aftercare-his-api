@@ -1,0 +1,25 @@
+/* =========================================================================
+   AfterCare · patients.css
+   ========================================================================= */
+.result-meta { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+.result-meta .grow { flex: 1; }
+.result-meta .compact { display: inline-flex; align-items: center; gap: 7px; }
+
+/* compact table density */
+.ctable.compact td { padding: 8px 14px; font-size: 13px; }
+.ctable.compact th { padding: 9px 14px; }
+.ctable .twolines { display: grid; gap: 1px; }
+.ctable .tag-row { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+
+/* card grid */
+.patient-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.patient-card { display: flex; flex-direction: column; gap: 10px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-card); cursor: pointer; }
+.patient-card:hover { border-color: var(--leaf); }
+.patient-card .pc-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.patient-card h3 { font-size: 17px; }
+.patient-card .pc-mrn { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--muted); }
+.patient-card .dx { color: var(--muted); font-size: 13px; margin: -2px 0 0; }
+.patient-card .summary { color: var(--text-2); font-size: 13.5px; flex: 1; }
+.patient-card .pc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); font-size: 12.5px; color: var(--muted); }
+.patient-card .actions { display: flex; gap: 8px; }
+@media (max-width: 640px) { .patient-grid { grid-template-columns: 1fr; } }

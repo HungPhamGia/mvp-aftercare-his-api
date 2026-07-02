@@ -55,3 +55,55 @@ class QuestionIn(BaseModel):
 class QuestionSetIn(BaseModel):
     ma_ho_so: str
     questions: list[QuestionIn]
+
+
+# --- Web demo: generate / edit / BFF ---
+class GenerateIn(BaseModel):
+    ma_ho_so: str
+
+
+class QuestionEditIn(BaseModel):
+    id: int | None = None  # present for existing questions, None for new ones
+    text: str
+    expected_var: str | None = None
+    answer_type: str | None = None
+    source: str | None = None  # "core" items cannot be deleted
+    red_flag: bool | None = None
+
+
+class QuestionsSaveIn(BaseModel):
+    questions: list[QuestionEditIn]
+
+
+class ConversationIn(BaseModel):
+    text: str
+    session_id: str
+    ma_ho_so: str
+    first_turn: bool = False
+
+
+class CallDemoIn(BaseModel):
+    ma_ho_so: str
+    transcript: list[dict[str, Any]] = []
+    answers: list[dict[str, Any]] | None = None
+    question_set_id: int | None = None
+
+
+# --- Disease question templates (per-disease default set) ---
+class TemplateIn(BaseModel):
+    disease: str
+    name: str
+    active: bool = True
+    assign: str | None = None
+    # question dicts pass through as-is: {text, required, disabled?, branch?}
+    questions: list[dict[str, Any]] = []
+
+
+# --- Patient-specific (optional) questions saved from the case panel ---
+class PatientQuestionIn(BaseModel):
+    text: str
+    expected_var: str | None = None
+
+
+class PatientQuestionSetIn(BaseModel):
+    questions: list[PatientQuestionIn] = []

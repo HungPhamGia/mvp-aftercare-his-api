@@ -1,22 +1,30 @@
+import json
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy import select
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from app import smartbot
 from app.db import get_db
 from app.models import BenhAn, CallResult, Monitoring, Question, QuestionSet
+from app.questions_gen import ai_suggest_questions, build_question_set
 from app.schemas import (
-    CallResultIn, GhiChuIn, MonitoringIn, QuestionSetIn,
-    SetVariablesIn, SetVariablesOut, ThuocIn,
+    CallDemoIn, CallResultIn, ConversationIn, GenerateIn, GhiChuIn, MonitoringIn,
+    PatientQuestionSetIn, QuestionSetIn, QuestionsSaveIn, SetVariablesIn,
+    SetVariablesOut, TemplateIn, ThuocIn,
 )
 
-app = FastAPI(title="Mock HIS API")
+app = FastAPI(title="AfterCare Web Demo")
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 
-@app.get("/")
+@app.get("/health")
 def health():
-    return {"status": "ok", "service": "mock-his-api"}
+    return {"status": "ok"}
 
 
 def row_to_dict(obj) -> dict:
@@ -37,6 +45,47 @@ def latest_call_result(db: Session, ma_ho_so: str) -> CallResult | None:
         .order_by(CallResult.id.desc())
         .limit(1)
     ).first()
+
+
+def latest_question_set(db: Session, ma_ho_so: str) -> QuestionSet | None:
+    return db.scalars(
+        select(QuestionSet)
+        .where(QuestionSet.ma_ho_so == ma_ho_so)
+        .order_by(QuestionSet.id.desc())
+        .limit(1)
+    ).first()
+
+
+# ponytail: keyword heuristic maps a patient to one disease template. Good enough
+# while every case is post-op; swap for an explicit patient→template field if the
+# roster grows beyond these buckets.
+DISEASE_KEYWORDS = {
+    "Sản khoa": ["tử cung", "thai", "sản", "âm đạo", "buồng trứng"],
+    "Chấn thương chỉnh hình": ["xương", "gãy", "khớp", "nẹp", "vít", "cổ tay", "mắt cá"],
+}
+
+
+def match_disease(rec: BenhAn) -> str:
+    hay = " ".join(filter(None, [rec.chan_doan, rec.phau_thuat])).lower()
+    for disease, kws in DISEASE_KEYWORDS.items():
+        if any(k in hay for k in kws):
+            return disease
+    return "Hậu phẫu"
+
+
+def _active_template_questions(db: Session, disease: str) -> list[dict]:
+    """The active template's question list for a disease ([] if none)."""
+    row = db.execute(
+        text("SELECT questions FROM question_templates "
+             "WHERE disease = :d AND active = true ORDER BY id LIMIT 1"),
+        {"d": disease},
+    ).scalar()
+    return row or []
+
+
+def _required_questions(db: Session, disease: str) -> list[dict]:
+    return [q for q in _active_template_questions(db, disease)
+            if q.get("required") and not q.get("disabled")]
 
 
 # --- Bot-facing: set_variables contract ---
@@ -189,4 +238,464 @@ def approve_question_set(set_id: int, db: Session = Depends(get_db)):
     for q in qset.questions:
         q.approved = True
     db.commit()
-    return {"question_set_id": qset.id, "status": qset.status}
+    return {"set_id": qset.id, "question_set_id": qset.id, "status": qset.status}
+
+
+# ---------------------------------------------------------------------------
+# Web demo: frontend-facing endpoints (browser only ever calls OUR endpoints)
+# ---------------------------------------------------------------------------
+
+# DB CHECK allows draft|pending|approved; the frontend contract calls it
+# "pending_review". Store 'pending', report 'pending_review'.
+def _status_label(status: str) -> str:
+    return "pending_review" if status == "pending" else status
+
+
+def q_to_spec(q: Question) -> dict:
+    return {
+        "id": q.id,
+        "text": q.text,
+        "expected_var": q.expected_var,
+        "answer_type": "boolean" if q.red_flag else "text",
+        "source": "core" if q.red_flag else "ai",
+        "red_flag": bool(q.red_flag),
+    }
+
+
+@app.get("/his/patients")
+def his_patients(db: Session = Depends(get_db)):
+    rows = db.scalars(select(BenhAn)).all()
+    out = []
+    for r in rows:
+        cr = latest_call_result(db, r.ma_ho_so)
+        mon = db.get(Monitoring, r.ma_ho_so)
+        out.append({
+            "ma_ho_so": r.ma_ho_so,
+            "ho_ten": r.ho_ten,
+            "gioi_tinh": r.gioi_tinh,
+            "tuoi": r.tuoi,
+            "phau_thuat": r.phau_thuat,
+            "chan_doan": r.chan_doan,
+            "ngay_xuat_vien": r.ngay_xuat_vien,
+            "bac_si_phu_trach": r.bac_si_phu_trach,
+            "lich_tai_kham": r.lich_tai_kham,
+            "sdt_benh_nhan": r.sdt_benh_nhan,
+            "sdt_nguoi_nha": r.sdt_nguoi_nha,
+            "latest_tier": cr.tier if cr else None,
+            "latest_summary": cr.summary if cr else None,
+            "escalated": bool(cr.escalated) if cr else False,
+            "next_call_at": mon.next_call_at if mon else None,
+        })
+    return out
+
+
+@app.get("/his/patient/{ma_ho_so}")
+def his_patient(ma_ho_so: str, db: Session = Depends(get_db)):
+    r = get_record_or_404(db, ma_ho_so)
+    mon = db.get(Monitoring, ma_ho_so)
+    # PHI: never expose so_the_bhyt.
+    return {
+        "ma_ho_so": r.ma_ho_so,
+        "ho_ten": r.ho_ten,
+        "gioi_tinh": r.gioi_tinh,
+        "tuoi": r.tuoi,
+        "ngay_nhap_vien": r.ngay_nhap_vien,
+        "ngay_xuat_vien": r.ngay_xuat_vien,
+        "ly_do_vao_vien": r.ly_do_vao_vien,
+        "phau_thuat": r.phau_thuat,
+        "bac_si_phu_trach": r.bac_si_phu_trach,
+        "chan_doan": r.chan_doan,
+        "sinh_hieu": r.sinh_hieu,
+        "thuoc_ke": r.thuoc_ke,
+        "ghi_chu_theo_doi": r.ghi_chu_theo_doi,
+        "lich_tai_kham": r.lich_tai_kham,
+        "sdt_benh_nhan": r.sdt_benh_nhan,
+        "sdt_nguoi_nha": r.sdt_nguoi_nha,
+        "next_call_at": mon.next_call_at if mon else None,
+    }
+
+
+@app.get("/his/appointments")
+def his_appointments(db: Session = Depends(get_db)):
+    """Re-exam appointments derived from each record's lich_tai_kham."""
+    rows = db.scalars(select(BenhAn).where(BenhAn.lich_tai_kham.is_not(None))).all()
+    out = [{
+        "ma_ho_so": r.ma_ho_so, "ho_ten": r.ho_ten, "chan_doan": r.chan_doan,
+        "phau_thuat": r.phau_thuat, "bac_si_phu_trach": r.bac_si_phu_trach,
+        "date": r.lich_tai_kham, "specialty": "Tái khám sau phẫu thuật",
+    } for r in rows]
+    out.sort(key=lambda a: str(a["date"]))
+    return out
+
+
+@app.get("/his/performance")
+def his_performance(db: Session = Depends(get_db)):
+    """Real call metrics computed from call_results / monitoring."""
+    calls = db.scalars(select(CallResult)).all()
+    by_tier = {"red": 0, "amber": 0, "green": 0}
+    escalated = 0
+    for cr in calls:
+        if cr.tier in by_tier:
+            by_tier[cr.tier] += 1
+        if cr.escalated:
+            escalated += 1
+    total = len(calls)
+    n_patients = db.scalar(select(func.count()).select_from(BenhAn))
+    overdue = db.scalar(
+        select(func.count()).select_from(Monitoring)
+        .where(Monitoring.next_call_at < datetime.now())
+    )
+    return {
+        "total_calls": total, "by_tier": by_tier, "escalated": escalated,
+        "patients": n_patients, "overdue": overdue,
+        "escalation_rate": round(escalated / total * 100, 1) if total else 0,
+    }
+
+
+@app.get("/his/notifications")
+def his_notifications(db: Session = Depends(get_db)):
+    """Derived alerts: escalated/red cases and overdue monitoring."""
+    groups = []
+    red = []
+    for r in db.scalars(select(BenhAn)).all():
+        cr = latest_call_result(db, r.ma_ho_so)
+        if cr and (cr.tier == "red" or cr.escalated):
+            red.append({"ma_ho_so": r.ma_ho_so,
+                        "text": f"{r.ho_ten} — nguy cơ cao ({cr.summary or 'cần bác sĩ xem'})"})
+    if red:
+        groups.append({"group": "Bệnh nhân nguy cơ cao", "tone": "red", "items": red})
+
+    overdue = []
+    now = datetime.now()
+    for m in db.scalars(select(Monitoring).where(Monitoring.next_call_at < now)).all():
+        rec = db.get(BenhAn, m.ma_ho_so)
+        overdue.append({"ma_ho_so": m.ma_ho_so,
+                        "text": f"{rec.ho_ten if rec else m.ma_ho_so} — quá hạn cuộc gọi theo dõi"})
+    if overdue:
+        groups.append({"group": "Theo dõi quá hạn", "tone": "amber", "items": overdue})
+    return groups
+
+
+@app.get("/his/templates")
+def his_templates(db: Session = Depends(get_db)):
+    rows = db.execute(text(
+        "SELECT id, disease, name, version, active, assign, questions, history "
+        "FROM question_templates ORDER BY id"
+    )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@app.post("/his/templates")
+def create_template(body: TemplateIn, db: Session = Depends(get_db)):
+    new_id = db.execute(
+        text("INSERT INTO question_templates "
+             "(disease, name, version, active, assign, questions, history) "
+             "VALUES (:d, :n, 'v1', :a, :asg, CAST(:q AS JSONB), CAST('[]' AS JSONB)) "
+             "RETURNING id"),
+        {"d": body.disease, "n": body.name, "a": body.active, "asg": body.assign,
+         "q": json.dumps(body.questions, ensure_ascii=False)},
+    ).scalar()
+    db.commit()
+    return {"id": new_id}
+
+
+@app.put("/his/templates/{tid}")
+def update_template(tid: int, body: TemplateIn, db: Session = Depends(get_db)):
+    res = db.execute(
+        text("UPDATE question_templates "
+             "SET disease = :d, name = :n, active = :a, assign = :asg, "
+             "    questions = CAST(:q AS JSONB) "
+             "WHERE id = :id"),
+        {"d": body.disease, "n": body.name, "a": body.active, "asg": body.assign,
+         "q": json.dumps(body.questions, ensure_ascii=False), "id": tid},
+    )
+    db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(404, f"template {tid} not found")
+    return {"id": tid}
+
+
+@app.delete("/his/templates/{tid}")
+def delete_template(tid: int, db: Session = Depends(get_db)):
+    db.execute(text("DELETE FROM question_templates WHERE id = :id"), {"id": tid})
+    db.commit()
+    return {"deleted": tid}
+
+
+@app.get("/his/escalation-rules")
+def his_escalation_rules(db: Session = Depends(get_db)):
+    rows = db.execute(text(
+        "SELECT id, name, active, when_text, risk, recipients, auto_appt, approval "
+        "FROM escalation_rules ORDER BY order_index, id"
+    )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@app.get("/his/patient/{ma_ho_so}/call-preview")
+def call_preview(ma_ho_so: str, db: Session = Depends(get_db)):
+    """Read-only script of what the AI call will cover for this patient:
+    the approved question set if one exists, otherwise the offline template
+    draft. No DB write — safe for doctors to preview any time."""
+    rec = get_record_or_404(db, ma_ho_so)
+    qset = db.scalars(
+        select(QuestionSet)
+        .where(QuestionSet.ma_ho_so == ma_ho_so, QuestionSet.status == "approved")
+        .order_by(QuestionSet.id.desc()).limit(1)
+    ).first()
+    if qset:
+        source = "approved"
+        questions = [
+            {"text": q.text, "expected_var": q.expected_var, "red_flag": bool(q.red_flag)}
+            for q in qset.questions
+        ]
+    else:
+        source = "template"
+        drafts = build_question_set({
+            "phau_thuat": rec.phau_thuat, "thuoc_ke": rec.thuoc_ke,
+            "ghi_chu_theo_doi": rec.ghi_chu_theo_doi,
+        })
+        questions = [
+            {"text": d["text"], "expected_var": d["expected_var"], "red_flag": bool(d["red_flag"])}
+            for d in drafts
+        ]
+    ten = rec.ho_ten or "anh/chị"
+    # ponytail: greeting/closing are presentation copy, not stored — tweak freely.
+    return {
+        "source": source,
+        "greeting": f"Dạ em chào {ten}, em là trợ lý theo dõi của bệnh viện, "
+                    f"gọi để hỏi thăm sức khỏe của {ten} sau khi xuất viện ạ. "
+                    "Em xin phép hỏi vài câu ngắn nhé.",
+        "questions": questions,
+        "closing": "Dạ em cảm ơn đã dành thời gian ạ. Nếu có dấu hiệu bất thường hoặc "
+                   f"nặng hơn, {ten} hãy liên hệ ngay bác sĩ phụ trách hoặc gọi 115. "
+                   f"Chúc {ten} mau khỏe ạ.",
+    }
+
+
+@app.post("/questions/generate")
+def questions_generate(body: GenerateIn, db: Session = Depends(get_db)):
+    rec = get_record_or_404(db, body.ma_ho_so)
+    drafts = build_question_set({
+        "phau_thuat": rec.phau_thuat,
+        "thuoc_ke": rec.thuoc_ke,
+        "ghi_chu_theo_doi": rec.ghi_chu_theo_doi,
+    })
+    qset = QuestionSet(ma_ho_so=body.ma_ho_so, status="pending", created_at=datetime.now())
+    qset.questions = [
+        Question(
+            text=d["text"], order_index=d["order_index"],
+            expected_var=d["expected_var"], red_flag=d["red_flag"], approved=False,
+        )
+        for d in drafts
+    ]
+    db.add(qset)
+    db.commit()
+    db.refresh(qset)
+    return {
+        "set_id": qset.id,
+        "status": _status_label(qset.status),
+        "questions": [q_to_spec(q) for q in qset.questions],
+    }
+
+
+@app.put("/questions/{set_id}")
+def questions_save(set_id: int, body: QuestionsSaveIn, db: Session = Depends(get_db)):
+    qset = db.get(QuestionSet, set_id)
+    if qset is None:
+        raise HTTPException(404, f"question_set {set_id} not found")
+
+    # Reject deletion of core (red_flag) items: every existing core id must remain.
+    existing_core = {q.id for q in qset.questions if q.red_flag}
+    incoming_ids = {q.id for q in body.questions if q.id is not None}
+    missing = existing_core - incoming_ids
+    if missing:
+        raise HTTPException(400, f"cannot delete core questions: {sorted(missing)}")
+
+    prior_core = existing_core  # ids that must stay red_flag
+    for q in list(qset.questions):  # clear then rebuild in submitted order
+        db.delete(q)
+    qset.questions = [
+        Question(
+            text=item.text, order_index=i, expected_var=item.expected_var,
+            red_flag=(item.source == "core") or bool(item.red_flag)
+                     or (item.id in prior_core),
+            approved=False,
+        )
+        for i, item in enumerate(body.questions)
+    ]
+    db.commit()
+    db.refresh(qset)
+    return {
+        "set_id": qset.id,
+        "status": _status_label(qset.status),
+        "questions": [q_to_spec(q) for q in qset.questions],
+    }
+
+
+# --- Patient question set (case-page panel): disease-required + patient extras ---
+@app.get("/his/patient/{ma_ho_so}/question-set")
+def get_patient_question_set(ma_ho_so: str, db: Session = Depends(get_db)):
+    rec = get_record_or_404(db, ma_ho_so)
+    disease = match_disease(rec)
+    qset = latest_question_set(db, ma_ho_so)
+    extras = [
+        {"id": q.id, "text": q.text, "expected_var": q.expected_var}
+        for q in (qset.questions if qset else []) if not q.red_flag
+    ]
+    return {
+        "disease": disease,
+        "required": [{"text": q.get("text")} for q in _required_questions(db, disease)],
+        "patient": extras,
+        "set_id": qset.id if qset else None,
+        "status": qset.status if qset else None,
+    }
+
+
+@app.post("/his/patient/{ma_ho_so}/question-set")
+def save_patient_question_set(
+    ma_ho_so: str, body: PatientQuestionSetIn, db: Session = Depends(get_db)
+):
+    """Persist ONLY the patient's set: disease-required questions (red_flag,
+    locked) + the patient-specific extras the doctor kept/accepted. Saved as an
+    approved set so the VoiceBot picks it up via call-preview / questions_fetch.
+    The disease default template is never modified here."""
+    rec = get_record_or_404(db, ma_ho_so)
+    disease = match_disease(rec)
+
+    qset = latest_question_set(db, ma_ho_so)
+    if qset is None:
+        qset = QuestionSet(ma_ho_so=ma_ho_so, status="approved", created_at=datetime.now())
+        db.add(qset)
+    else:
+        for q in list(qset.questions):
+            db.delete(q)
+        qset.questions = []
+    db.flush()
+
+    merged: list[Question] = []
+    for i, rq in enumerate(_required_questions(db, disease)):
+        merged.append(Question(text=rq.get("text"), order_index=i,
+                               expected_var=rq.get("expected_var"), red_flag=True, approved=True))
+    base = len(merged)
+    for j, pq in enumerate(body.questions):
+        merged.append(Question(text=pq.text, order_index=base + j,
+                               expected_var=pq.expected_var, red_flag=False, approved=True))
+    qset.questions = merged
+    qset.status = "approved"
+    qset.approved_at = datetime.now()
+    db.commit()
+    db.refresh(qset)
+    return {"set_id": qset.id, "status": qset.status, "count": len(merged)}
+
+
+@app.post("/questions/ai-suggest")
+def questions_ai_suggest(body: GenerateIn, db: Session = Depends(get_db)):
+    """AI-suggested extra questions for preview — NOT saved. Deduped against the
+    disease template (required + optional) and the patient's current set."""
+    rec = get_record_or_404(db, body.ma_ho_so)
+    disease = match_disease(rec)
+    existing = {_norm_q(q.get("text")) for q in _active_template_questions(db, disease)}
+    qset = latest_question_set(db, body.ma_ho_so)
+    if qset:
+        existing |= {_norm_q(q.text) for q in qset.questions}
+    existing.discard("")
+    candidates = ai_suggest_questions(
+        {"disease": disease, "phau_thuat": rec.phau_thuat, "chan_doan": rec.chan_doan,
+         "thuoc_ke": rec.thuoc_ke, "ghi_chu_theo_doi": rec.ghi_chu_theo_doi},
+        existing,
+    )
+    return {"disease": disease, "candidates": candidates}
+
+
+def _norm_q(text: str | None) -> str:
+    return " ".join((text or "").lower().split())
+
+
+@app.get("/his/patient/{ma_ho_so}/call-results")
+def patient_call_results(ma_ho_so: str, db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(CallResult)
+        .where(CallResult.ma_ho_so == ma_ho_so)
+        .order_by(CallResult.id.desc())
+    ).all()
+    out = []
+    for cr in rows:
+        out.append({
+            "session_id": cr.session_id,
+            "ended_at": cr.ended_at,
+            "tier": cr.tier,
+            "summary": cr.summary,
+            "escalated": bool(cr.escalated),
+            "answers": _build_answers(db, cr),
+            "transcript": cr.transcript if isinstance(cr.transcript, list) else [],
+        })
+    return out
+
+
+def _build_answers(db: Session, cr: CallResult) -> list[dict]:
+    # raw_answers / extracted are JSONB maps keyed by expected_var.
+    # ponytail: assumes dict shape; non-dict raw collapses to None.
+    raw = cr.raw_answers if isinstance(cr.raw_answers, dict) else {}
+    extracted = cr.extracted if isinstance(cr.extracted, dict) else {}
+    qset = db.get(QuestionSet, cr.question_set_id) if cr.question_set_id else None
+    if qset:
+        return [
+            {"question": q.text, "expected_var": q.expected_var,
+             "raw": raw.get(q.expected_var), "value": extracted.get(q.expected_var)}
+            for q in qset.questions
+        ]
+    keys = list(dict.fromkeys([*extracted, *raw]))
+    return [
+        {"question": None, "expected_var": k, "raw": raw.get(k), "value": extracted.get(k)}
+        for k in keys
+    ]
+
+
+@app.post("/his/call-demo/save")
+def call_demo_save(body: CallDemoIn, db: Session = Depends(get_db)):
+    """Persist a finished demo call: store the transcript, then summarise +
+    classify (GPT, heuristic fallback) and save as a call_results row so it
+    shows up in the patient's case history."""
+    get_record_or_404(db, body.ma_ho_so)
+    from app import call_analysis
+    result = call_analysis.analyze(body.transcript)
+
+    extracted: dict = {}
+    for a in body.answers or []:
+        key = a.get("expected_var") or a.get("question")
+        if key:
+            extracted[key] = a.get("answer")
+
+    cr = CallResult(
+        ma_ho_so=body.ma_ho_so,
+        question_set_id=body.question_set_id,
+        session_id="demo-" + datetime.now().strftime("%Y%m%d%H%M%S"),
+        started_at=datetime.now(),
+        ended_at=datetime.now(),
+        raw_answers=extracted or None,
+        extracted=extracted or None,
+        transcript=body.transcript,
+        tier=result["tier"],
+        summary=result["summary"],
+        escalated=result["escalated"],
+        escalation_channel="Bác sĩ phụ trách" if result["escalated"] else None,
+    )
+    db.add(cr)
+    db.commit()
+    db.refresh(cr)
+    return {
+        "call_id": cr.id, "tier": result["tier"], "summary": result["summary"],
+        "escalated": result["escalated"], "source": result["source"],
+    }
+
+
+@app.post("/bff/conversation")
+async def bff_conversation(body: ConversationIn):
+    return await smartbot.converse(
+        text=body.text, session_id=body.session_id,
+        ma_ho_so=body.ma_ho_so, first_turn=body.first_turn,
+    )
+
+
+# SPA served last so explicit API routes above take precedence.
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
