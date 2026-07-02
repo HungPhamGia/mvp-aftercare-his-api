@@ -1,17 +1,18 @@
 /* =========================================================================
    AfterCare · chatbot.js — "Demo cuộc gọi AI".
-   Pick a patient → the AI assistant places a mock call: a phone screen on the
-   left, a live transcript on the right. The bot reads each scripted question
-   aloud (browser TTS — to be swapped for SmartBot TTS); the clinician answers
-   as the patient (typing, or the mic via Web Speech / future SmartVoice STT).
+   Pick a patient → the VNPT Smartbot places the call via the server BFF
+   (/bff/conversation — creds never reach the browser). The first turn seeds
+   ma_ho_so through metadata.button_variables server-side; later turns reuse
+   the same session_id. Bot text is read aloud (browser TTS); the clinician
+   answers as the patient (typing, quickreply chips, or Web Speech mic).
    On hang-up the transcript is saved and GPT summarises + classifies the tier.
    ========================================================================= */
 
 function demoId() { return new URLSearchParams(location.search).get("id") || ""; }
 
 const DEMO = {
-  maHoSo: demoId(), patient: null, script: null,
-  idx: 0, phase: "setup", transcript: [], answers: [],
+  maHoSo: demoId(), patient: null, session: null, lastQ: null,
+  phase: "setup", transcript: [], answers: [],
   awaiting: false, ttsOn: true, startTs: 0, timerId: null, rec: null,
 };
 
@@ -58,19 +59,15 @@ async function startCall(mrn) {
   DEMO.maHoSo = mrn;
   DEMO.patient = getPatient(mrn);
   DEMO.ttsOn = $("#demoTts") ? $("#demoTts").checked : true;
-  DEMO.idx = 0; DEMO.transcript = []; DEMO.answers = []; DEMO.awaiting = false;
+  DEMO.transcript = []; DEMO.answers = []; DEMO.awaiting = false; DEMO.lastQ = null;
+  DEMO.session = crypto.randomUUID ? crypto.randomUUID() : "s" + Date.now() + Math.random();
   history.replaceState(null, "", location.pathname + "?id=" + encodeURIComponent(mrn));
 
-  let s;
-  try { s = await API.get("/his/patient/" + encodeURIComponent(mrn) + "/call-preview"); }
-  catch (e) { toast("Không tải được kịch bản: " + e.message); return; }
-  DEMO.script = s;
   DEMO.phase = "calling";
   renderCall();
   startTimer();
-  // greeting → first question
-  botTurn(s.greeting, false);
-  setTimeout(askNext, 1400);
+  // First turn: server seeds ma_ho_so via metadata.button_variables.
+  botAsk("alo", true);
 }
 
 function renderCall() {
@@ -96,6 +93,7 @@ function renderCall() {
       <section class="transcript-panel card">
         <div class="tp-head"><span class="live-dot"></span> Bản ghi trực tiếp</div>
         <div id="tpLog" class="tp-log" aria-live="polite"></div>
+        <div id="qrRow" class="tp-quick"></div>
         <form id="answerForm" class="tp-input">
           <input id="answerText" class="input" type="text" autocomplete="off"
                  placeholder="Trả lời thay bệnh nhân (hoặc bấm 🎙 để nói)…">
@@ -128,27 +126,46 @@ function botTurn(text, isQuestion) {
   if (st) st.textContent = isQuestion ? "Đang chờ bệnh nhân trả lời…" : "Đang gọi…";
 }
 
-function askNext() {
-  if (DEMO.phase !== "calling") return;
-  const qs = DEMO.script.questions || [];
-  if (DEMO.idx < qs.length) {
-    botTurn(qs[DEMO.idx].text, true);
-  } else {
-    botTurn(DEMO.script.closing, false);
+/* Send one turn to the Smartbot BFF and render its reply. */
+async function botAsk(text, firstTurn) {
+  const st = $("#phStatus"); if (st) st.textContent = "Trợ lý đang xử lý…";
+  let r;
+  try {
+    r = await API.post("/bff/conversation", {
+      text, session_id: DEMO.session, ma_ho_so: DEMO.maHoSo, first_turn: !!firstTurn,
+    });
+  } catch (e) {
+    toast("Lỗi kết nối trợ lý: " + e.message);
+    DEMO.awaiting = true;
+    return;
+  }
+  if (DEMO.phase !== "calling") return; // hung up while waiting
+  if (r.text) { DEMO.lastQ = r.text; botTurn(r.text, true); }
+  renderQuick(r.quickreplies);
+  if (r.handoff) {
+    botTurn("⚠ Cuộc gọi được chuyển cho điều dưỡng trực.", false);
     setTimeout(() => endCall(), 2200);
   }
+}
+
+function renderQuick(opts) {
+  const row = $("#qrRow");
+  if (!row) return;
+  row.innerHTML = (opts || []).map(o => `<button type="button" class="chip">${esc(o)}</button>`).join("");
+  row.querySelectorAll(".chip").forEach(b =>
+    b.addEventListener("click", () => submitAnswer(b.textContent)));
 }
 
 function submitAnswer(text) {
   text = (text || "").trim();
   if (!text || DEMO.phase !== "calling" || !DEMO.awaiting) return;
-  const q = (DEMO.script.questions || [])[DEMO.idx];
   DEMO.transcript.push({ who: DEMO.patient ? DEMO.patient.name : "Bệnh nhân", text });
-  DEMO.answers.push({ question: q ? q.text : null, expected_var: q ? q.expected_var : null, answer: text });
-  DEMO.idx++; DEMO.awaiting = false;
+  DEMO.answers.push({ question: DEMO.lastQ, answer: text });
+  DEMO.awaiting = false;
   const inp = $("#answerText"); if (inp) inp.value = "";
+  renderQuick([]);
   renderTranscript();
-  setTimeout(askNext, 900);
+  botAsk(text, false);
 }
 
 /* ---- mic (Web Speech STT if available; SmartVoice later) -------------- */

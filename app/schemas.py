@@ -18,20 +18,6 @@ class SetVariablesOut(BaseModel):
 
 
 # --- Dashboard / write-back payloads ---
-class CallResultIn(BaseModel):
-    ma_ho_so: str
-    question_set_id: int | None = None
-    session_id: str | None = None
-    started_at: datetime | None = None
-    ended_at: datetime | None = None
-    raw_answers: dict[str, Any] | None = None
-    extracted: dict[str, Any] | None = None
-    tier: str | None = None
-    summary: str | None = None
-    escalated: bool | None = None
-    escalation_channel: str | None = None
-
-
 class GhiChuIn(BaseModel):
     ghi_chu_theo_doi: str
 

@@ -12,7 +12,7 @@ from app.db import get_db
 from app.models import BenhAn, CallResult, Monitoring, Question, QuestionSet
 from app.questions_gen import ai_suggest_questions, build_question_set
 from app.schemas import (
-    CallDemoIn, CallResultIn, ConversationIn, GenerateIn, GhiChuIn, MonitoringIn,
+    CallDemoIn, ConversationIn, GenerateIn, GhiChuIn, MonitoringIn,
     PatientQuestionSetIn, QuestionSetIn, QuestionsSaveIn, SetVariablesIn,
     SetVariablesOut, TemplateIn, ThuocIn,
 )
@@ -99,33 +99,44 @@ def patient_fetch(body: SetVariablesIn, db: Session = Depends(get_db)):
     rec = get_record_or_404(db, ma_ho_so)
 
     # PHI minimization: omit so_the_bhyt, chan_doan (ICD), xet_nghiem.
+    # Console vars are strings; empty = "". ngay_hau_phau = lich_tai_kham
+    # (dùng để nhắc lịch tái khám ở cuối cuộc gọi).
     return SetVariablesOut(set_variables={
-        "ho_ten": rec.ho_ten,
-        "phau_thuat": rec.phau_thuat,
-        "ngay_xuat_vien": str(rec.ngay_xuat_vien) if rec.ngay_xuat_vien else None,
-        "lich_tai_kham": str(rec.lich_tai_kham) if rec.lich_tai_kham else None,
-        "bac_si_phu_trach": rec.bac_si_phu_trach,
+        "ho_ten": rec.ho_ten or "",
+        "phau_thuat": rec.phau_thuat or "",
+        "ngay_hau_phau": str(rec.lich_tai_kham) if rec.lich_tai_kham else "",
+        "bac_si_phu_trach": rec.bac_si_phu_trach or "",
     })
 
 
-@app.get("/his/record/{ma_ho_so}/questions")
-def questions_fetch(ma_ho_so: str, db: Session = Depends(get_db)):
+@app.post("/his/questions/fetch", response_model=SetVariablesOut)
+def questions_fetch(body: SetVariablesIn, db: Session = Depends(get_db)):
+    """API-Card cho Smartbot console: câu hỏi phẳng cau_hoi_1..cau_hoi_5.
+    Ưu tiên bộ đã duyệt của bệnh nhân; chưa duyệt thì dùng bản mẫu theo bệnh
+    (giống call-preview). Câu trống = ""."""
+    ma_ho_so = body.set_variables.get("ma_ho_so")
+    if not ma_ho_so:
+        raise HTTPException(400, "set_variables.ma_ho_so required")
+    rec = get_record_or_404(db, ma_ho_so)
+
     qset = db.scalars(
         select(QuestionSet)
         .where(QuestionSet.ma_ho_so == ma_ho_so, QuestionSet.status == "approved")
         .order_by(QuestionSet.id.desc())
         .limit(1)
     ).first()
-    if qset is None:
-        return {"question_set_id": None, "questions": [], "has_approved_set": False}
-    return {
-        "question_set_id": qset.id,
-        "has_approved_set": True,
-        "questions": [
-            {"text": q.text, "order_index": q.order_index, "expected_var": q.expected_var}
-            for q in qset.questions
-        ],
-    }
+    if qset:
+        texts = [q.text for q in qset.questions]
+    else:
+        texts = [d["text"] for d in build_question_set({
+            "phau_thuat": rec.phau_thuat, "thuoc_ke": rec.thuoc_ke,
+            "ghi_chu_theo_doi": rec.ghi_chu_theo_doi,
+        })]
+    # ponytail: console template carries max 5 question slots; extras dropped.
+    texts = texts[:5]
+    sv = {f"cau_hoi_{i}": (texts[i - 1] if i <= len(texts) else "") for i in range(1, 6)}
+    sv["so_cau_hoi"] = str(len(texts))
+    return SetVariablesOut(set_variables=sv)
 
 
 # --- Dashboard (plain JSON) ---
@@ -164,15 +175,23 @@ def call_result_history(ma_ho_so: str, db: Session = Depends(get_db)):
     return [row_to_dict(r) for r in rows]
 
 
-# --- Write-back ---
+# --- Write-back (API-Card cuối cuộc gọi: đáp án trong set_variables) ---
 @app.post("/his/call-result")
-def create_call_result(body: CallResultIn, db: Session = Depends(get_db)):
-    get_record_or_404(db, body.ma_ho_so)
-    cr = CallResult(**body.model_dump())
+def create_call_result(body: SetVariablesIn, db: Session = Depends(get_db)):
+    sv = body.set_variables
+    ma_ho_so = sv.get("ma_ho_so")
+    if not ma_ho_so:
+        raise HTTPException(400, "set_variables.ma_ho_so required")
+    get_record_or_404(db, ma_ho_so)
+    cr = CallResult(
+        ma_ho_so=ma_ho_so,
+        session_id=sv.get("session_id"),
+        raw_answers={k: v for k, v in sv.items() if k not in ("ma_ho_so", "session_id")},
+        ended_at=datetime.now(),
+    )
     db.add(cr)
     db.commit()
-    db.refresh(cr)
-    return {"id": cr.id}
+    return {"status": "success", "code": 200}
 
 
 @app.put("/records/{ma_ho_so}/ghi-chu")
